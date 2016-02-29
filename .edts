@@ -1,0 +1,3 @@
+:node-name "mos_like_rabbit_cluster_load@demandred"
+:lib-dirs '("deps")
+:start-command "make shell \"SHELL_OPTS=-sname mos_like_rabbit_cluster_load@demandred\""
