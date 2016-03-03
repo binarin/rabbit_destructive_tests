@@ -1,3 +1,3 @@
-:node-name "mos_like_rabbit_cluster_load@demandred"
+:node-name "rabbit_destructive_tests@localhost"
 :lib-dirs '("deps")
-:start-command "make shell \"SHELL_OPTS=-sname mos_like_rabbit_cluster_load@demandred\""
+:start-command "make shell \"SHELL_OPTS=-sname rabbit_destructive_tests@localhost\""
