@@ -13,6 +13,7 @@
         ,start_users/2
         ,ack_user/1
         ,ctl/2
+        ,ctl_list/2
         ,info/1
         ,info/2
         ,network_delay/1
@@ -65,7 +66,12 @@ start_users(Count, Fun) ->
 
 ctl(NodeNumber, CtlArgs) ->
     {ok, CtlPath, BaseArgs, Env} = gen_server:call(?SERVER, {ctl_run_template, NodeNumber}),
-    sut_exec:run([CtlPath | BaseArgs ++ CtlArgs], Env).
+    sut_exec:system([CtlPath | BaseArgs ++ CtlArgs], Env).
+
+ctl_list(NodeNumber, CtlArgs) ->
+    {ok, CtlPath, BaseArgs, Env} = gen_server:call(?SERVER, {ctl_run_template, NodeNumber}),
+    {0, [<<"Listing", _/binary>> | Items]} = sut_exec:run(CtlPath, BaseArgs ++ CtlArgs, [{env, Env}, line]),
+    [list_to_tuple(re:split(Item, <<"\t">>)) || Item <- Items].
 
 ack_user(Acker) ->
     Acker ! {user_ack, self()}.
@@ -132,10 +138,10 @@ code_change(_OldVsn, State, _Extra) ->
 %% Private functions
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 run_helper(Helper, Args) ->
-    0 = sut_exec:run([code:priv_dir(sut) ++ "/" ++ Helper | Args]).
+    0 = sut_exec:system([code:priv_dir(sut) ++ "/" ++ Helper | Args]).
 
 git_checkout_cluster(Dir, NumNodes) ->
-    0 = sut_exec:run([code:priv_dir(sut) ++ "/git_checkout_cluster.sh", Dir, NumNodes]),
+    0 = sut_exec:system([code:priv_dir(sut) ++ "/git_checkout_cluster.sh", Dir, NumNodes]),
     #state{nodes = [ {"127.0.0.1", 17000 + NodeNumber} || NodeNumber <- lists:seq(1, NumNodes) ],
            ctl_path = Dir ++ "/scripts/rabbitmqctl",
            ctl_env = [{"ERL_LIBS", Dir ++ "/deps"}]
