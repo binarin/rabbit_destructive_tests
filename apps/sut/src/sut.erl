@@ -20,6 +20,9 @@
         ,num_nodes/0
         ]).
 
+%% API for querying state
+-export([queue_exists/2]).
+
 -type host_only() :: string().
 -type host_port() :: {host(), 1..65535}.
 -type host() :: host_only() | host_port().
@@ -91,6 +94,23 @@ network_delay(Delay) ->
 
 num_nodes() ->
     gen_server:call(?SERVER, num_nodes).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Querying API
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+-spec queue_exists(NodeNumber :: non_neg_integer(), QName) -> boolean() when
+      QName :: atom() | string() | binary().
+
+queue_exists(NodeNumber, QName) when is_atom(QName) ->
+    queue_exists(NodeNumber, atom_to_binary(QName, utf8));
+queue_exists(NodeNumber, QName) when is_list(QName) ->
+    queue_exists(NodeNumber, list_to_binary(QName));
+queue_exists(NodeNumber, QName) ->
+    Queues = ctl_list(NodeNumber, ["list_queues"]),
+    case proplists:get_value(QName, Queues) of
+        undefined -> false;
+        _ -> true
+    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% gen_server callbacks
