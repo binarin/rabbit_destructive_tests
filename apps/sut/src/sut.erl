@@ -1,6 +1,7 @@
 -module(sut).
 -behaviour(gen_server).
 -define(SERVER, ?MODULE).
+-define(TIMEOUT, 3600 * 1000).
 
 %% gen_server callbacks
 -export([terminate/2, init/1, handle_info/2, handle_cast/2, handle_call/3, code_change/3]).
@@ -40,13 +41,20 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -spec start() -> {ok, pid()}.
 start() ->
+    application:ensure_all_started(amqp_client),
     gen_server:start({local, ?SERVER}, ?MODULE, [], []).
 
 %% @doc Initializes SUT to some default configuration - single running
 %% broker with basic config.
 -spec default() -> ok.
 default() ->
-    gen_server:call(?SERVER, default, 600000).
+    NodeCount = list_to_integer(os:getenv("NODE_COUNT", "3")),
+    case os:getenv("RABBITMQ_GIT") of
+        Path when is_list(Path) ->
+            gen_server:call(?SERVER, {git_checkout_cluster, Path, NodeCount}, 3600 * 1000);
+        _ ->
+            exit(no_default_deploy_method_selected)
+    end.
 
 %% @doc Creates AMQP connection to random node under test
 -spec amqp_connect() -> {ok, ConnectionPid :: pid(), ChannelPid :: pid()}.
@@ -65,7 +73,7 @@ random_node() ->
 -spec start_users(Count :: non_neg_integer(),
                   fun(() -> term())) -> ok.
 start_users(Count, Fun) ->
-    gen_server:call(?SERVER, {start_users, Count, Fun}).
+    gen_server:call(?SERVER, {start_users, Count, Fun}, ?TIMEOUT).
 
 ctl(NodeNumber, CtlArgs) ->
     {ok, CtlPath, BaseArgs, Env} = gen_server:call(?SERVER, {ctl_run_template, NodeNumber}),
@@ -133,8 +141,9 @@ handle_call({start_users, Count, Fun}, From, State) ->
     {noreply, State};
 handle_call(random_node, _From, State) ->
     {reply, {ok, choose_random_node(State)}, State};
-handle_call(default, _From, _State) ->
-    NewState = git_checkout_cluster("/home/binarin/mirantis-workspace/rabbitmq-server", 3),
+handle_call({git_checkout_cluster, Path, NodeNumber}, _From, _State) ->
+    sut:info("Starting ~b-node cluster using git checkout of rabbit at ~s", [NodeNumber, Path]),
+    NewState = git_checkout_cluster(Path, NodeNumber),
     sut:info("Initialized ~p node cluster", [length(NewState#state.nodes)]),
     {reply, ok, NewState};
 
@@ -184,7 +193,7 @@ do_start_users(Count, Fun, From) ->
                                                  {user_ack, Pid} ->
                                                      ok
                                              after
-                                                 10000 ->
+                                                 100000 ->
                                                      exit({user_failed_to_start, Pid})
                                              end
                                      end,
