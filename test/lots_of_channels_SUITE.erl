@@ -15,9 +15,21 @@
 -define(QUEUES_PER_USER, 300).
 -define(NUM_USERS, 50).
 
+-define(BUILTIN_EXCHANGE_COUNT, 8).
+
 all() ->
     [{group, list_test, [{userdata, #{cmd => "list_queues", expected_count => ?QUEUES_PER_USER * ?NUM_USERS}}]}
     ,{group, list_test, [{userdata, #{cmd => "list_channels", expected_count => (1 + ?CHANNELS_PER_USER) * ?NUM_USERS}}]}
+    ,{group, list_test, [{userdata, #{cmd => "list_users", expected_count => 11, skip_speed => true}}]}
+    ,{group, list_test, [{userdata, #{cmd => "list_permissions", expected_count => 1, skip_speed => true}}]}
+    ,{group, list_test, [{userdata, #{cmd => "list_parameters", expected_count => 0, skip_speed => true}}]}
+    ,{group, list_test, [{userdata, #{cmd => "list_policies", expected_count => 1, skip_speed => true}}]}
+    ,{group, list_test, [{userdata, #{cmd => "list_vhosts", expected_count => 1, skip_speed => true}}]}
+    ,{group, list_test, [{userdata, #{cmd => "list_user_permissions", args => ["guest"], expected_count => 1, skip_speed => true}}]}
+    ,{group, list_test, [{userdata, #{cmd => "list_exchanges", expected_count => ?BUILTIN_EXCHANGE_COUNT + ?QUEUES_PER_USER * ?NUM_USERS, skip_speed => true}}]}
+    ,{group, list_test, [{userdata, #{cmd => "list_bindings", expected_count => 2 * ?QUEUES_PER_USER * ?NUM_USERS, skip_speed => true}}]}
+    ,{group, list_test, [{userdata, #{cmd => "list_connections", expected_count => ?NUM_USERS, skip_speed => true}}]}
+    ,{group, list_test, [{userdata, #{cmd => "list_consumers", expected_count => ?NUM_USERS * ?QUEUES_PER_USER, skip_speed => true}}]}
     ].
 
 groups() ->
@@ -26,6 +38,7 @@ groups() ->
 init_per_suite(Config) ->
     sut:start(),
     sut:default(),
+    sut:network_delay(false),
     sut:start_users(?NUM_USERS, fun channel_opening_user/1),
     0 = sut:ctl(1, ["status"]),
     Config.
@@ -33,7 +46,14 @@ init_per_suite(Config) ->
 channel_opening_user(Acker) ->
     {ok, Connection, Channel} = sut:amqp_connect(),
     [ amqp_connection:open_channel(Connection) || _ <- lists:seq(1, ?CHANNELS_PER_USER) ],
-    [ #'queue.declare_ok'{} = amqp_channel:call(Channel, #'queue.declare'{exclusive = true}) || _ <- lists:seq(1, ?QUEUES_PER_USER)],
+    [ begin
+          #'queue.declare_ok'{queue = QName} = amqp_channel:call(Channel, #'queue.declare'{durable = true}),
+          Exchange = list_to_binary([ $a + rand:uniform(26) - 1 || _ <- lists:seq(1, 32)]),
+          #'exchange.declare_ok'{} = amqp_channel:call(Channel, #'exchange.declare'{exchange = Exchange}),
+          #'queue.bind_ok'{} = amqp_channel:call(Channel, #'queue.bind'{queue = QName, exchange = Exchange}),
+          #'basic.consume_ok'{} = amqp_channel:call(Channel, #'basic.consume'{queue = QName})
+      end || _ <- lists:seq(1, ?QUEUES_PER_USER)],
+
     sut:ack_user(Acker),
     Unique = make_ref(),
     receive
@@ -61,7 +81,16 @@ userdata(Config) ->
     proplists:get_value(userdata, GroupProps).
 
 list_items_speed(Config) ->
-    #{cmd := Cmd} = userdata(Config),
+    Userdata = userdata(Config),
+    case Userdata of
+        #{skip_speed := true} ->
+            ok;
+        _ ->
+            list_items_speed(Userdata, Config)
+    end.
+
+list_items_speed(Userdata, _Config) ->
+    #{cmd := Cmd} = Userdata,
     ct:pal("Testing speed of '~s'", [Cmd]),
 
     %% Establish baseline
@@ -84,16 +113,12 @@ list_items_speed(Config) ->
 
 %% Check that all items were returned by list command
 list_items_sanity(Config) ->
-    #{cmd := Cmd, expected_count := Expected} = userdata(Config),
-
+    Userdata = userdata(Config),
+    #{cmd := Cmd, expected_count := Expected} = Userdata,
+    Args = maps:get(args, Userdata, []),
     ct:pal("Testing sanity of '~s', expecting ~b items", [Cmd, Expected]),
-
-    List = sut:ctl_list(1, [Cmd]),
+    List = sut:ctl_list(1, [Cmd] ++ Args),
     Got = length(List),
-
     ct:pal("Got ~b items", [Got]),
-
     Expected = Got,
-
-    timer:sleep(1000000),
     ok.

@@ -9,6 +9,7 @@ ROOT=$(dirname $(readlink -f $0))
 
 RABBIT_DIR=${1:?}
 NUM_NODES=${2:-3}
+: ${NUM_USERS:=10}
 
 node-numbers() {
     seq 1 ${1:?}
@@ -112,6 +113,26 @@ wait-node() {
     return 1
 }
 
+create-user() {
+    local name="${1:?}"
+    local password="${2:?}"
+    run-ctl 1 add_user $name $password
+}
+
+create-users() {
+    local num_users="${1:?}"
+    local user_suffix
+    for user_suffix in $(seq 1 $num_users); do
+        create-user "sut$user_suffix" "sut$user_suffix"
+    done
+}
+
+set-ha-policy() {
+    run-ctl 1 set_policy ha-all "^ha\." '{"ha-mode":"all"}'
+}
+
 start-n-nodes $NUM_NODES
 join-nodes $(node-numbers $NUM_NODES)
 wait-nodes $(node-numbers $NUM_NODES)
+create-users $NUM_USERS
+set-ha-policy

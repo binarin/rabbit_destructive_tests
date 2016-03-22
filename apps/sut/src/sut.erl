@@ -193,7 +193,7 @@ do_start_users(Count, Fun, From) ->
                                                  {user_ack, Pid} ->
                                                      ok
                                              after
-                                                 100000 ->
+                                                 600000 ->
                                                      exit({user_failed_to_start, Pid})
                                              end
                                      end,
