@@ -1,4 +1,5 @@
-#!/bin/bash -eu
+#!/usr/bin/env bash
+set -eu
 set -o pipefail
 export LANG=C
 if ${trace:-false}; then
@@ -30,7 +31,7 @@ start-node() {
     purge-node $node_number
 
     # erlang.mk is not happy with nested invocations on unrelated projects
-    env -i "HOME=$HOME" make -C "$RABBIT_DIR" \
+    env -i "HOME=$HOME" "PATH=$PATH" make -C "$RABBIT_DIR" \
         run-background-broker \
         RABBITMQ_PID_FILE=$(node-pid-file $node_number) \
         RABBITMQ_NODENAME=$(node-name $node_number) \
