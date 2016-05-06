@@ -1,6 +1,53 @@
-RABBITMQ_SERVER=/home/binarin/mirantis-workspace/rabbit/upstream/scripts/rabbitmq-server
-RABBITMQCTL="$(dirname $RABBITMQ_SERVER)/rabbitmqctl"
-ERLANG_SSL=1
+: ${RABBITMQ_SERVER:=/home/binarin/mirantis-workspace/rabbit/parallel-listing/scripts/rabbitmq-server}
+: ${RABBITMQCTL:=$(dirname $RABBITMQ_SERVER)/rabbitmqctl}
+: ${RABBITMQ_PLUGINS:=$(dirname $RABBITMQ_SERVER)/rabbitmq-plugins}
+: ${RABBITMQ_PLUGINS_DIR:=$(readlink -f $(dirname $RABBITMQ_SERVER)/../plugins)}
+: ${ERLANG_SSL:=1}
+
+detect-root() {
+    readlink -f $(dirname ${BASH_SOURCE[0]})/../../../
+}
+
+: ${DESTRUCTIVE_ROOT:=$(detect-root)}
+
+base-port-for() {
+    local node_name="${1:?}"
+    local alloc_dir; alloc_dir="$(node-dir port-alloc)"
+    local target_dir; target_dir="$(node-dir $node_name)"
+    local candidate_port=20100
+
+    if [[ -f $alloc_dir/$node_name ]]; then
+        cat $alloc_dir/$node_name
+        return 0
+    fi
+
+    mkdir -p $alloc_dir
+
+    while [[ $candidate_port -lt 32000 ]]; do
+        if ln -T -s $target_dir $alloc_dir/$candidate_port; then
+            echo $candidate_port > $alloc_dir/$node_name
+            echo $candidate_port
+            return 0
+        fi
+        candidate_port=$(($candidate_port + 100))
+    done
+
+    echo "Failed to allocate test node port"
+    return 1
+}
+
+dump-default-config() {
+    local root="${1:?}"
+    echo "export RABBITMQ_SERVER=$(pwd)/scripts/rabbitmq-server"
+    echo "export ERLANG_SSL=0"
+    echo "export AMQP_SSL=0"
+    echo ". $root/functions.sh"
+}
+
+run-ctl-for() {
+    local node_name="${1:?}"; shift
+    run-ctl -n "$node_name"@localhost "$@"
+}
 
 run-ctl() {
     ERL_LIBS="$(erl-libs)" \
@@ -12,6 +59,12 @@ run-server-binary() {
     ERL_LIBS=$(erl-libs) \
     RABBITMQ_CTL_ERL_ARGS="$(erl-args)" \
     RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS="$(erl-args)" \
+    RABBITMQ_PLUGINS_DIR="$RABBITMQ_PLUGINS_DIR" \
+    RABBITMQ_CONFIG_FILE="$node_dir/rabbitmq.config" \
+    RABBITMQ_NODENAME="$node_name@localhost" \
+    RABBITMQ_SCHEMA_DIR="$node_dir/schema" \
+    RABBITMQ_PLUGINS_EXPAND_DIR="$node_dir/plugins" \
+    RABBITMQ_ENABLED_PLUGINS_FILE="$node_dir/enabled_plugins" \
     $RABBITMQ_SERVER "$@"
 }
 
@@ -49,7 +102,6 @@ erl-args() {
 }
 
 ensure-ssl-certs() {
-    set -x
     local dir
     dir=$(node-dir ssl-certificates)
 
@@ -102,22 +154,6 @@ prepare-ssl-ca-dir() {
     touch $dir/index.txt
 }
 
-base-port-for() {
-    local node="${1:?}"
-    case $node in
-        ssl-1)
-            echo 20100;;
-        ssl-2)
-            echo 20200;;
-        ssl-3)
-            echo 20300;;
-        *)
-            echo "Can't find port range for node $node" 1>&2 
-            exit 1
-            ;;
-    esac
-}
-
 amqp-port() {
     local base_port="${1:?}"
     echo $(($base_port + 1))
@@ -131,6 +167,11 @@ dist-port() {
 amqp-ssl-port() {
     local base_port="${1:?}"
     echo $(($base_port + 3))
+}
+
+mgmt-port() {
+    local base_port="${1:?}"
+    echo $(($base_port + 4))
 }
 
 node-dir() {
@@ -169,6 +210,7 @@ start-fresh-background-node() {
     local node_dir; node_dir="$(node-dir $node_name)"
     reset-node $node_name
     start-node $node_name > $node_dir/log/startup_err 2>&1 &
+    sleep 5
 }
 
 start-node() {
@@ -176,12 +218,13 @@ start-node() {
 
     local node_dir; node_dir="$(node-dir $node_name)"
 
-    set -x
     RABBITMQ_MNESIA_BASE="$node_dir/mnesia" \
     RABBITMQ_LOG_BASE="$node_dir/log" \
     RABBITMQ_CONFIG_FILE="$node_dir/rabbitmq.config" \
     RABBITMQ_NODENAME="$node_name@localhost" \
     RABBITMQ_SCHEMA_DIR="$node_dir/schema" \
+    RABBITMQ_PLUGINS_EXPAND_DIR="$node_dir/plugins" \
+    RABBITMQ_ENABLED_PLUGINS_FILE="$node_dir/enabled_plugins" \
     run-server-binary
 }
 
@@ -193,7 +236,8 @@ generate-rabbit-config() {
     set-config $node_dir \
                kernel inet_dist_listen_min $(dist-port $base_port) \
                kernel inet_dist_listen_max $(dist-port $base_port) \
-               rabbit tcp_listeners "[$(amqp-port $base_port)]"
+               rabbit tcp_listeners "[$(amqp-port $base_port)]" \
+               rabbitmq_management listener "[{port, $(mgmt-port $base_port)}]"
 
     set-ssl-options $node_name
 
@@ -277,7 +321,7 @@ render-config() {
     echo "  []"
     echo " }"
 
-    for section in rabbit kernel; do
+    for section in rabbit kernel rabbitmq_management; do
         echo -e ",{$section,\n  [{make_next_comma_safe_dummy_param, true}"
         for maybe_file in $node_dir/conf.d/$section/*; do
             if [[ ! -e $maybe_file ]]; then
@@ -349,3 +393,54 @@ extendedKeyUsage = 1.3.6.1.5.5.7.3.1
 EOF
 }
 
+declare-some-queues() {
+    local node_name="${1:?}"
+    local num_queues="${2:?}"
+    local base_port; base_port="$(base-port-for $node_name)"
+    local mgmt_port; mgmt_port="$(mgmt-port $base_port)"
+    local iter
+
+    for iter in $(seq 1 $num_queues); do
+        declare-queue-throgh-mgmt $mgmt_port $(random-string)
+    done
+}
+
+declare-queue-throgh-mgmt() {
+    local port="${1:?}"
+    local queue="${2:?}"
+    curl --silent --show-error -i -u guest:guest -H "content-type:application/json" \
+         -XPUT -d'{"durable":true}' \
+         "http://localhost:$port/api/queues/%2f/$queue" > /dev/null
+}
+
+run-plugins-for() {
+    local node_name="${1:?}"; shift
+    local node_dir; node_dir="$(node-dir $node_name)"
+
+    RABBITMQ_CONFIG_FILE="$node_dir/rabbitmq.config" \
+    RABBITMQ_NODENAME="$node_name@localhost" \
+    RABBITMQ_SCHEMA_DIR="$node_dir/schema" \
+    RABBITMQ_PLUGINS_EXPAND_DIR="$node_dir/plugins" \
+    RABBITMQ_ENABLED_PLUGINS_FILE="$node_dir/enabled_plugins" \
+    run-plugins -n $node_name@localhost "$@"
+}
+
+run-plugins() {
+    ERL_LIBS="$(erl-libs)" \
+    RABBITMQ_CTL_ERL_ARGS="$(erl-args)" \
+    RABBITMQ_PLUGINS_DIR="$RABBITMQ_PLUGINS_DIR" \
+    $RABBITMQ_PLUGINS "$@"
+}
+
+random-string() {
+    cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1
+}
+
+for-each-node() {
+    local nodes="${1:?}"
+    local cmd="${2:?}"
+    shift 2
+    for node in $nodes; do
+        $cmd $node "$@"
+    done
+}
