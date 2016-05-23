@@ -2,7 +2,9 @@
 : ${RABBITMQCTL:=$(dirname $RABBITMQ_SERVER)/rabbitmqctl}
 : ${RABBITMQ_PLUGINS:=$(dirname $RABBITMQ_SERVER)/rabbitmq-plugins}
 : ${RABBITMQ_PLUGINS_DIR:=$(readlink -f $(dirname $RABBITMQ_SERVER)/../plugins)}
-: ${ERLANG_SSL:=1}
+
+: ${ERLANG_SSL:=0}
+: ${AMQP_SSL:=0}
 
 detect-root() {
     readlink -f $(dirname ${BASH_SOURCE[0]})/../../../
@@ -443,4 +445,14 @@ for-each-node() {
     for node in $nodes; do
         $cmd $node "$@"
     done
+}
+
+choose-default-amqp-port() {
+    local node_name="${1:?}"
+    local base_port; base_port=$(base-port-for $node_name)
+    if [[ $AMQP_SSL -gt 0 ]]; then
+        echo $(amqp-ssl-port $base_port)
+    else
+        echo $(amqp-port $base_port)
+    fi
 }

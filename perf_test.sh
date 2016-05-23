@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-set -exu
+set -eu
 set -o pipefail
 
 ROOT=$(dirname $(readlink -f -- $0))
 
-. $ROOT/apps/sut/priv/functions.sh
-
 BB_DIR=/home/binarin/mirantis-workspace/basho_bench
-CONCURRENCY=1
-DURATION=1
+. $ROOT/apps/sut/priv/functions.sh
+. $ROOT/apps/sut/priv/perf.sh
+
+HEADER_DUMPED=0
+
 
 # export PATH=/home/binarin/mirantis-workspace/otp/bin:$PATH
 
@@ -21,94 +22,68 @@ setup-test-nodes() {
     join-nodes ssl-1 ssl-2 ssl-3
 }
 
-test-description() {
-    echo "erl=$ERLANG_SSL,amqp=$AMQP_SSL,ha=$HA"
-}
-
-amqp-port-under-test() {
-    local node_name="${1:?}"
-    local base_port; base_port=$(base-port-for $node_name)
-    if [[ $AMQP_SSL -gt 0 ]]; then
-        echo $(amqp-ssl-port $base_port)
-    else
-        echo $(amqp-port $base_port)
-    fi
-}
-
-generate-bb-config() {
-    BB_CONF=/tmp/bb.conf.tmp
-    rm -rf $BB_CONF
-    
-    set-opt mode max
-    set-opt concurrent $CONCURRENCY
-    set-opt duration $DURATION
-    set-opt operations '[{rpc, 100}]'
-    set-opt driver bb_rpc_driver
-    set-opt code_paths "[$(echo $(pwd)/*/*/ebin | perl -lanE 'say join ",", map { qq{"$_"} } @F')]"
-    set-opt amqp_servers "$(cat <<EOF
-[{"127.0.0.1", $(amqp-port-under-test ssl-1)}
-,{"127.0.0.1", $(amqp-port-under-test ssl-2)}
-,{"127.0.0.1", $(amqp-port-under-test ssl-3)}
-]
-EOF
-)"
-
-    set-opt amqp_ssl_options "$(ssl-options)"
-}
-
-ssl-options() {
-    local ssl_ca_dir; ssl_ca_dir=$(node-dir ssl-certificates)
-    if [[ $AMQP_SSL -gt 0 ]]; then
-        cat <<EOF
-[{cacertfile, "$ssl_ca_dir/cacert.pem"}
-,{certfile, "$ssl_ca_dir/client/cert.pem"}
-,{keyfile, "$ssl_ca_dir/client/key.pem"}
-,{verify, verify_peer}
-,{fail_if_no_peer_cert,true}
-,{ciphers, "DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA256:DHE-RSA-AES128-SHA256:DHE-DSS-AES128-SHA256:AES128-SHA256:DHE-RSA-AES256-SHA:DHE-DSS-AES256-SHA:AES256-SHA:DHE-RSA-AES128-SHA:DHE-DSS-AES128-SHA:AES128-SHA" }
-]
-EOF
-    else
-        echo "none";
-    fi
-}
-
-
-set-opt() {
-    while [[ $# -gt 0 ]]; do
-        echo "{${1:?}, ${2:?}}." >> $BB_CONF
-        shift 2
-    done
-}
-
 run-benchmark() {
-    local test_dir="${1:?}"
-    mkdir -p $test_dir
-    $BB_DIR/basho_bench --results-dir $test_dir $BB_CONF
-    Rscript --vanilla $BB_DIR/priv/summary.r -i $test_dir/current
-    cp $test_dir/current/summary.png result-A${AMQP_SSL}E${ERLANG_SSL}H${HA}.png
+    echo -e "Benchmarking $ITER_VALUES"
+    mkdir -p $TEST_DIR
+    $BB_DIR/basho_bench --results-dir $TEST_DIR $BB_CONF
+    Rscript --vanilla $BB_DIR/priv/summary.r -i $TEST_DIR/current
+    cp $TEST_DIR/current/summary.png $SUMMARY_TARGET
+    echo -e "$ITER_VALUES\t$($DESTRUCTIVE_ROOT/apps/sut/priv/throughput.r $TEST_DIR/current/summary.csv)" >> result.csv
 }
 
-BASELINE=
-make
-for ERLANG_SSL in 0 1; do
-    setup-test-nodes
-    for HA in 0; do
-        if [[ $HA -gt 0 ]]; then
-            run-ctl -n ssl-1@localhost set_policy ha-all "." '{"ha-mode":"all"}'
-        fi
-        for AMQP_SSL in 0 1; do
-            TEST="results/$(date +'%Y%m%d%H%M%S')-$(test-description)"
-            generate-bb-config
-            run-benchmark $TEST
-            if [[ -z $BASELINE ]]; then
-                BASELINE=$TEST
+set-benchmark-outputs() {
+    TEST_DIR=./results/$QUEUE_PLACEMENT-$MESSAGING_PATTERN
+    SUMMARY_TARGET=$QUEUE_PLACEMENT-$MESSAGING_PATTERN.png
+}
+
+dump-summary-header() {
+    if [[ $HEADER_DUMPED -eq 0 ]]; then
+        echo -e "$ITER_HEAD\ttroughput" > result.csv
+        HEADER_DUMPED=1
+    fi
+}
+
+run-stages() {
+    local ITER_HEAD_ORIG="${ITER_HEAD:-}"
+    local ITER_VALUES_ORIG="${ITER_VALUES:-}"
+    if [[ $# -eq 0 ]]; then
+        return 0
+    fi
+    local this_stage="$1"; shift
+    case $this_stage in
+        iterate:*)
+            if [[ $this_stage =~ ^iterate:([A-Z0-9_]+)=(.+)$ ]]; then
+                local var_name="${BASH_REMATCH[1]}"
+                local values="${BASH_REMATCH[2]}"
+                local cur_value
+                while IFS=, read cur_value; do
+                    eval $var_name="$cur_value"
+                    echo "Setting $var_name to $cur_value"
+                    local ITER_HEAD="${ITER_HEAD_ORIG:-}${ITER_HEAD_ORIG:+\t}$var_name"
+                    local ITER_VALUES="${ITER_VALUES_ORIG:-}${ITER_VALUES_ORIG:+\t}$cur_value"
+                    run-stages "$@"
+                done < <(echo $values | sed -e 's/,/\n/g') # write it this way to prevent subshell
             else
-                Rscript --vanilla $BB_DIR/priv/compare.r \
-                        -o cmp$AMQP_SSL$ERLANG_SSL$HA.png \
-                        --dir1 $BASELINE/current/ --tag1 base \
-                        --dir2 $TEST/current/ --tag2 "A=$AMQP_SSL,E=$ERLANG_SSL,H=$HA"
+                echo "Malformed iteration stage: $this_stage"
             fi
-        done
-    done
-done
+            ;;
+        *)
+            echo Running $this_stage
+            $this_stage
+            run-stages "$@"
+            ;;
+    esac
+}
+
+stages=(
+    make
+    setup-test-nodes
+    iterate:QUEUE_PLACEMENT=first_node,worst
+    iterate:MESSAGING_PATTERN=explicit_reply_queue,direct_reply_to
+    dump-summary-header
+    generate-bb-config
+    set-benchmark-outputs
+    run-benchmark
+)
+
+run-stages "${stages[@]}"
