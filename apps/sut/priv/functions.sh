@@ -646,7 +646,7 @@ memoized() {
 
 ensure-docker-network() {
     if ! docker network inspect rabbit-sut-net > /dev/null 2>&1 ; then
-	debug "Creating docker network $rabbit-sut-net"
+        debug "Creating docker network rabbit-sut-net"
         docker network create rabbit-sut-net
     fi
 }
