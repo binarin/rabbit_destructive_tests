@@ -595,7 +595,7 @@ prepare-docker-image() {
     local target="$DESTRUCTIVE_ROOT/.docker-context"
 
     mkdir -p $target/rabbit_destructive_tests/apps/sut/priv
-    rsync -az $DESTRUCTIVE_ROOT/apps/sut/priv/ $target/rabbit_destructive_tests/apps/sut/priv
+    rsync --delete -az $DESTRUCTIVE_ROOT/apps/sut/priv/ $target/rabbit_destructive_tests/apps/sut/priv
 
     prepare-remote-rabbit-installation $target
     # prepare-remote-ssl-certs $target
@@ -607,12 +607,12 @@ prepare-docker-image() {
 
 prepare-remote-test-framework() {
     local host="${1:?}"
-    rsync -az $DESTRUCTIVE_ROOT/ "$host":/tmp/rabbit_destructive_tests
+    rsync --delete -az $DESTRUCTIVE_ROOT/ "$host":/tmp/rabbit_destructive_tests
 }
 
 prepare-remote-rabbit-installation() {
     local target="${1:?}"
-    rsync -az $(dirname $(dirname $RABBITMQ_SERVER))/ $target/rabbit_under_test
+    rsync --delete -az $(dirname $(dirname $RABBITMQ_SERVER))/ $target/rabbit_under_test
 }
 
 prepare-remote-ssl-certs() {
