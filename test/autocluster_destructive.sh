@@ -2,14 +2,14 @@
 set -eu
 set -o pipefail
 
-ROOT=$(readlink -f $(dirname $0))
+ROOT=$(readlink -f $(dirname $0)/..)
 
 RABBIT=https://github.com/binarin/rabbitmq-server
-RABBIT_REF=rabbitmq-server-fix-join-cluster-when-already-member
+RABBIT_REF=gh/rabbitmq-server-fix-join-cluster-when-already-member
 RABBIT_DIR=$ROOT/tmp/autocluster-destructive-rabbit
 
 AUTOCLUSTER=https://github.com/binarin/rabbitmq-autocluster
-AUTOCLUSTER_REF=rabbitmq-autocluster-detect-join-errors
+AUTOCLUSTER_REF=gh/rabbitmq-autocluster-detect-join-errors
 AUTOCLUSTER_DIR=$ROOT/tmp/autocluster-destructive-autocluster
 
 export RABBITMQ_SERVER=$RABBIT_DIR/scripts/rabbitmq-server
@@ -276,6 +276,7 @@ remove-old-docker-containers() {
 }
 
 ensure-etcd-container() {
+    ensure-docker-network
     ensure-running-docker-container \
         autocluster-eval-etcd $(ensure-docker-image microbox/etcd:latest) \
         --name autocluster-eval-etcd --bind-addr=0.0.0.0 --addr=autocluster-eval-etcd:4001
@@ -283,20 +284,34 @@ ensure-etcd-container() {
 
 checkout-and-build-autocluster() {
     if [[ ! -d $AUTOCLUSTER_DIR ]]; then
-        git clone -b $AUTOCLUSTER_REF $AUTOCLUSTER $AUTOCLUSTER_DIR
+        git clone https://github.com/aweber/rabbitmq-autocluster $AUTOCLUSTER_DIR
+        (
+            cd $AUTOCLUSTER_DIR
+            git remote add gh $AUTOCLUSTER
+            git remote update gh
+            git checkout -b some-junk
+            git branch -D master
+            git checkout -b master $AUTOCLUSTER_REF
+        )
     fi
-    make -C $AUTOCLUSTER_DIR dist
+    make -C $AUTOCLUSTER_DIR dist current_rmq_ref=stable base_rmq_ref=stable
 }
 
 checkout-and-build-rabbit() {
     if [[ ! -d $RABBIT_DIR ]]; then
-        git clone -b $RABBIT_REF $RABBIT $RABBIT_DIR
+        git clone https://github.com/rabbitmq/rabbitmq-server $RABBIT_DIR
+        (
+            cd $RABBIT_DIR
+            git remote add gh $RABBIT
+            git remote update gh
+            git checkout -b stable $RABBIT_REF
+        )
     fi
-    make -C $RABBIT_DIR dist PLUGINS=rabbitmq_management
+    make -C $RABBIT_DIR dist PLUGINS=rabbitmq_management current_rmq_ref=stable base_rmq_ref=stable
 }
 
 inject-autocluster-into-rabbit() {
-    cp $AUTOCLUSTER_DIR/autocluster*.ez $AUTOCLUSTER_DIR/rabbitmq_aws*.ez $RABBIT_DIR/plugins
+    cp $AUTOCLUSTER_DIR/plugins/autocluster*.ez $AUTOCLUSTER_DIR/plugins/rabbitmq_aws*.ez $RABBIT_DIR/plugins
 }
 
 case "$1" in
