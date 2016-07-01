@@ -4,5 +4,6 @@
 ebin/
 deps/
 logs/
-
 results
+/.docker-context
+/TAGS

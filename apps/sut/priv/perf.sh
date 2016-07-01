@@ -14,22 +14,36 @@ set-bb-opt() {
     done
 }
 
+bb-amqp-credentials() {
+    local node_name="${1:?}"
+    echo "{\"$(host-part $node_name)\", $(choose-default-amqp-port $node_name)}"
+}
+
+all-nodes-bb-amqp-credentials() {
+    echo "["
+    local node_name
+    local non_first_iteration=
+    for node_name in "${SUT_NODES[@]}"; do
+        if [[ -n $non_first_iteration ]]; then
+            echo -n ", "
+        fi
+        non_first_iteration=1
+        bb-amqp-credentials $node_name
+    done
+    echo "]"
+}
+
 generate-bb-config() {
     rm -rf $BB_CONF
-    
+
+    set-bb-opt log_level info
     set-bb-opt mode max
     set-bb-opt concurrent $CONCURRENCY
     set-bb-opt duration $DURATION
     set-bb-opt operations '[{rpc, 100}]'
     set-bb-opt driver bb_rpc_driver
     set-bb-opt code_paths "[$(echo $(pwd)/*/*/ebin | perl -lanE 'say join ",", map { qq{"$_"} } @F')]"
-    set-bb-opt amqp_servers "$(cat <<EOF
-[{"127.0.0.1", $(choose-default-amqp-port ssl-1)}
-,{"127.0.0.1", $(choose-default-amqp-port ssl-2)}
-,{"127.0.0.1", $(choose-default-amqp-port ssl-3)}
-]
-EOF
-)"
+    set-bb-opt amqp_servers "$(all-nodes-bb-amqp-credentials)"
     set-bb-opt oslo_queue_placement "${QUEUE_PLACEMENT}"
     set-bb-opt amqp_ssl_options "$(bb-ssl-options)"
 }
@@ -49,4 +63,38 @@ EOF
     else
         echo "none";
     fi
+}
+
+run-stages() {
+    local cur_value
+    local var_name
+    local values
+    local ITER_HEAD_ORIG="${ITER_HEAD:-}"
+    local ITER_VALUES_ORIG="${ITER_VALUES:-}"
+    if [[ $# -eq 0 ]]; then
+        return 0
+    fi
+    local this_stage="$1"; shift
+    case $this_stage in
+        iterate:*)
+            if [[ $this_stage =~ ^iterate:([A-Z0-9_]+)=(.+)$ ]]; then
+                var_name="${BASH_REMATCH[1]}"
+                values="${BASH_REMATCH[2]}"
+                for cur_value in $(echo $values | tr "," "\n"); do
+                    eval $var_name="$cur_value"
+                    echo "Setting $var_name to $cur_value"
+                    local ITER_HEAD="${ITER_HEAD_ORIG:-}${ITER_HEAD_ORIG:+\t}$var_name"
+                    local ITER_VALUES="${ITER_VALUES_ORIG:-}${ITER_VALUES_ORIG:+\t}$cur_value"
+                    run-stages "$@"
+                done
+            else
+                echo "Malformed iteration stage: $this_stage"
+            fi
+            ;;
+        *)
+            echo Running $this_stage
+            $this_stage
+            run-stages "$@"
+            ;;
+    esac
 }

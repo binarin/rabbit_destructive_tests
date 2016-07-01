@@ -130,7 +130,7 @@ init_client(QName, Config) ->
     State4 = consume_replies(State3),
     State4.
 
-prepare_client_fabric(#client_state{config = #config{placement = direct_reply_to}} = State) ->
+prepare_client_fabric(#client_state{config = #config{pattern = direct_reply_to}} = State) ->
     State#client_state{reply_queue = <<"amq.rabbitmq.reply-to">>};
 prepare_client_fabric(#client_state{config = Config} = State) ->
     [DeclareCreds, _, _] = Config#config.servers,
@@ -145,7 +145,7 @@ client_connect(#client_state{config = Config} = State) ->
     {_Conn, Chan} = connect(ClientCreds),
     State#client_state{chan = Chan}.
 
-consume_replies(#client_state{chan = Chan, config = #config{placement = direct_reply_to}} = State) ->
+consume_replies(#client_state{chan = Chan, config = #config{pattern = direct_reply_to}} = State) ->
     #'basic.consume_ok'{} = amqp_channel:call(Chan, #'basic.consume'{queue = <<"amq.rabbitmq.reply-to">>, no_ack=true}),
     State;
 consume_replies(#client_state{chan = Chan, reply_queue = Queue} = State) ->

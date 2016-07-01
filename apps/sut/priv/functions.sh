@@ -1,10 +1,16 @@
+#!/usr/bin/env bash
 : ${RABBITMQ_SERVER:=/home/binarin/mirantis-workspace/rabbit/parallel-listing/scripts/rabbitmq-server}
 : ${RABBITMQCTL:=$(dirname $RABBITMQ_SERVER)/rabbitmqctl}
 : ${RABBITMQ_PLUGINS:=$(dirname $RABBITMQ_SERVER)/rabbitmq-plugins}
 : ${RABBITMQ_PLUGINS_DIR:=$(readlink -f $(dirname $RABBITMQ_SERVER)/../plugins)}
-
 : ${ERLANG_SSL:=0}
 : ${AMQP_SSL:=0}
+
+: ${INVOKE_REMOTE_HOST:=}
+
+DEBUG=${DEBUG:-}
+DEBUG_PREFIX=${DEBUG_PREFIX:-DEBUG: [$(hostname)-$$]}
+MAYBE_NOHUP=
 
 detect-root() {
     readlink -f $(dirname ${BASH_SOURCE[0]})/../../../
@@ -12,7 +18,64 @@ detect-root() {
 
 : ${DESTRUCTIVE_ROOT:=$(detect-root)}
 
+CLEANUP_FUNCTIONS=()
+perform-cleanup() {
+    local cleanup_fun
+    for cleanup_fun in "${CLEANUP_FUNCTIONS[@]}"; do
+        $cleanup_fun || true
+    done
+}
+
+register-cleanup() {
+    trap perform-cleanup EXIT INT TERM
+    CLEANUP_FUNCTIONS+=("${1:?}")
+}
+
 base-port-for() {
+    local node_name="${1:?}"
+    memoized remote-invoke $(host-part $node_name) local-base-port-for $node_name
+}
+
+host-part() {
+   local node_name="${1:?}"
+   local name_part
+   local host_part
+   IFS=@ read name_part host_part <<< "$node_name"
+   echo "$host_part"
+}
+
+remote-invoke() {
+    local remote_host="${1:?}"; shift
+    case $remote_host in
+        localhost|$INVOKE_REMOTE_HOST)
+            # localhost or remote invoke destination
+            "$@"
+            ;;
+        docker-*)
+            memoized ensure-docker-sut-container "$remote_host" > /dev/null
+            docker exec "$remote_host" env \
+                RABBITMQ_SERVER=/tmp/rabbit_under_test/scripts/rabbitmq-server \
+                INVOKE_REMOTE_HOST="$remote_host" \
+                ERLANG_SSL="$ERLANG_SSL" \
+		DEBUG_PREFIX="$DEBUG_PREFIX" \
+		DEBUG="$DEBUG" \
+                /tmp/rabbit_destructive_tests/apps/sut/priv/invoke.sh "$@"
+            ;;
+        *)
+            memoized prepare-remote "$remote_host" > /dev/null
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=no $remote_host \
+                env \
+                RABBITMQ_SERVER=/tmp/rabbit_under_test/scripts/rabbitmq-server \
+                INVOKE_REMOTE_HOST="$remote_host" \
+                ERLANG_SSL="$ERLANG_SSL" \
+		DEBUG_PREFIX="$DEBUG_PREFIX" \
+		DEBUG="$DEBUG" \
+                /tmp/rabbit_destructive_tests/apps/sut/priv/invoke.sh "$@"
+            ;;
+    esac
+}
+
+local-base-port-for() {
     local node_name="${1:?}"
     local alloc_dir; alloc_dir="$(node-dir port-alloc)"
     local target_dir; target_dir="$(node-dir $node_name)"
@@ -44,11 +107,12 @@ dump-default-config() {
     echo "export ERLANG_SSL=0"
     echo "export AMQP_SSL=0"
     echo ". $root/functions.sh"
+    echo "\"\$@\""
 }
 
 run-ctl-for() {
     local node_name="${1:?}"; shift
-    run-ctl -n "$node_name"@localhost "$@"
+    remote-invoke $(host-part $node_name) run-ctl -n "$node_name" "$@"
 }
 
 run-ctl() {
@@ -62,11 +126,12 @@ run-server-binary() {
     RABBITMQ_CTL_ERL_ARGS="$(erl-args)" \
     RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS="$(erl-args)" \
     RABBITMQ_PLUGINS_DIR="$RABBITMQ_PLUGINS_DIR" \
-    RABBITMQ_CONFIG_FILE="$node_dir/rabbitmq.config" \
-    RABBITMQ_NODENAME="$node_name@localhost" \
+    RABBITMQ_CONFIG_FILE="$node_dir/rabbitmq" \
+    RABBITMQ_NODENAME="$node_name" \
     RABBITMQ_SCHEMA_DIR="$node_dir/schema" \
     RABBITMQ_PLUGINS_EXPAND_DIR="$node_dir/plugins" \
     RABBITMQ_ENABLED_PLUGINS_FILE="$node_dir/enabled_plugins" \
+    $MAYBE_NOHUP \
     $RABBITMQ_SERVER "$@"
 }
 
@@ -101,17 +166,25 @@ erl-args() {
         echo "-ssl_dist_opt client_ciphers $ciphers"
         echo "-ssl_dist_opt server_ciphers $ciphers"
     fi
+
+    echo "-setcookie rabbit_destructive_tests"
 }
 
 ensure-ssl-certs() {
-    local dir
-    dir=$(node-dir ssl-certificates)
+    local dir; dir=$(node-dir ssl-certificates)
+    if [[ ! -f "$dir/client/key-and-cert.pem" ]]; then
+        generate-ssl-certs
+    fi
+}
+
+generate-ssl-certs() {
+    local dir; dir=$(node-dir ssl-certificates)
 
     rm -rf $dir
 
     prepare-ssl-ca-dir $dir
     ensure-ssl-ca-config $dir
-    
+
     # CA
     openssl req -x509 -config $dir/openssl.conf -newkey rsa:2048 -days 365 \
             -out $dir/cacert.pem -outform PEM -subj /CN=MyTestCA/ -nodes
@@ -156,6 +229,17 @@ prepare-ssl-ca-dir() {
     touch $dir/index.txt
 }
 
+choose-default-amqp-port() {
+    local node_name="${1:?}"
+    local func
+    if [[ $AMQP_SSL -eq 0 ]]; then
+        func=amqp-port
+    else
+        func=amqp-ssl-port
+    fi
+    $func $(base-port-for $node_name)
+}
+
 amqp-port() {
     local base_port="${1:?}"
     echo $(($base_port + 1))
@@ -191,12 +275,27 @@ start-fresh-node() {
     start-node $node_name
 }
 
+kill-rabbit-proc() {
+    local node_name="${1:?}"
+    remote-invoke $(host-part $node_name) kill-rabbit-proc-local $node_name
+}
+
+kill-rabbit-proc-local() {
+    local node_name="${1:?}"
+    pkill -9 -f "beam.*-sname $node_name" || true
+}
+
 reset-node() {
+    local node_name="${1:?}"
+    remote-invoke $(host-part $node_name) reset-node-local $node_name
+}
+
+reset-node-local() {
     local node_name="${1:?}"
     local node_dir
     node_dir="$(node-dir $node_name)"
 
-    pkill -9 -f "beam.*-sname $node_name@localhost" || true
+    kill-rabbit-proc-local $node_name
     reset-node-dir $node_dir
     generate-rabbit-config $node_name
 }
@@ -209,13 +308,36 @@ reset-node-dir() {
 
 start-fresh-background-node() {
     local node_name="${1:?}"
+    remote-invoke $(host-part $node_name) local-start-fresh-background-node $node_name
+}
+
+start-background-node() {
+    local node_name="${1:?}"
+    remote-invoke $(host-part $node_name) local-start-background-node $node_name
+}
+
+local-start-background-node() {
+    local node_name="${1:?}"
     local node_dir; node_dir="$(node-dir $node_name)"
+    local MAYBE_NOHUP=nohup
+    debug "Starting background node $node_name, further debug output is not possible"
+    start-node-local $node_name > $node_dir/log/startup_err 2>&1 &
+    sleep 1 # Give it some time before start-node-local reaches nohup
+}
+
+local-start-fresh-background-node() {
+    local node_name="${1:?}"
     reset-node $node_name
-    start-node $node_name > $node_dir/log/startup_err 2>&1 &
-    sleep 5
+    local-start-background-node $node_name
 }
 
 start-node() {
+    local node_name="${1:?}"
+    remote-invoke $(host-part $node_name) start-node-local $node_name
+}
+
+start-node-local() {
+    set -x
     local node_name="${1:?}"
 
     local node_dir; node_dir="$(node-dir $node_name)"
@@ -223,7 +345,7 @@ start-node() {
     RABBITMQ_MNESIA_BASE="$node_dir/mnesia" \
     RABBITMQ_LOG_BASE="$node_dir/log" \
     RABBITMQ_CONFIG_FILE="$node_dir/rabbitmq.config" \
-    RABBITMQ_NODENAME="$node_name@localhost" \
+    RABBITMQ_NODENAME="$node_name" \
     RABBITMQ_SCHEMA_DIR="$node_dir/schema" \
     RABBITMQ_PLUGINS_EXPAND_DIR="$node_dir/plugins" \
     RABBITMQ_ENABLED_PLUGINS_FILE="$node_dir/enabled_plugins" \
@@ -235,14 +357,20 @@ generate-rabbit-config() {
     local node_dir; node_dir="$(node-dir $node_name)"
     local base_port; base_port="$(base-port-for $node_name)"
 
-    set-config $node_dir \
-               kernel inet_dist_listen_min $(dist-port $base_port) \
-               kernel inet_dist_listen_max $(dist-port $base_port) \
-               rabbit tcp_listeners "[$(amqp-port $base_port)]" \
-               rabbitmq_management listener "[{port, $(mgmt-port $base_port)}]"
+    local-set-config $node_name \
+                     kernel inet_dist_listen_min $(dist-port $base_port) \
+                     kernel inet_dist_listen_max $(dist-port $base_port) \
+                     rabbit tcp_listeners "[$(amqp-port $base_port)]" \
+                     rabbitmq_management listener "[{port, $(mgmt-port $base_port)}]" \
+                     rabbit loopback_users '[]'
 
     set-ssl-options $node_name
+    local-update-config-file $node_name
+}
 
+local-update-config-file() {
+    local node_name="${1:?}"
+    local node_dir; node_dir="$(node-dir $node_name)"
     render-config $node_dir > $node_dir/rabbitmq.config
 }
 
@@ -252,9 +380,9 @@ set-ssl-options() {
     local base_port; base_port="$(base-port-for $node_name)"
     local ssl_ca_dir; ssl_ca_dir=$(node-dir ssl-certificates)
 
-    set-config $node_dir \
-               rabbit ssl_listeners "[$(amqp-ssl-port $base_port)]" \
-               rabbit ssl_options "$(cat <<EOF
+    local-set-config $node_name \
+                     rabbit ssl_listeners "[$(amqp-ssl-port $base_port)]" \
+                     rabbit ssl_options "$(cat <<EOF
 [{cacertfile, "$ssl_ca_dir/cacert.pem"}
 ,{certfile, "$ssl_ca_dir/server/cert.pem"}
 ,{keyfile, "$ssl_ca_dir/server/key.pem"}
@@ -267,8 +395,9 @@ EOF
 
 }
 
-set-config() {
-    local node_dir="${1:?}"; shift
+local-set-config() {
+    local node_name="${1:?}"; shift
+    local node_dir; node_dir=$(node-dir $node_name)
     local section
     local param
     local value
@@ -290,7 +419,7 @@ wait-nodes() {
 wait-node() {
     local try_no
     for try_no in $(seq 1 10); do
-        if run-ctl -n "$1@localhost" status > /dev/null 2>&1 ; then
+        if run-ctl-for "$1" status > /dev/null 2>&1 ; then
             return 0
         fi
         sleep 1
@@ -309,9 +438,9 @@ join-nodes() {
 join-node() {
     local join_to="${1:?}"
     local node_name="${2:?}"
-    run-ctl -n $node_name@localhost stop_app
-    run-ctl -n $node_name@localhost join_cluster $join_to@localhost
-    run-ctl -n $node_name@localhost start_app
+    run-ctl -n $node_name stop_app
+    run-ctl -n $node_name join_cluster $join_to
+    run-ctl -n $node_name start_app
 }
 
 render-config() {
@@ -323,7 +452,7 @@ render-config() {
     echo "  []"
     echo " }"
 
-    for section in rabbit kernel rabbitmq_management; do
+    for section in rabbit kernel rabbitmq_management autocluster; do
         echo -e ",{$section,\n  [{make_next_comma_safe_dummy_param, true}"
         for maybe_file in $node_dir/conf.d/$section/*; do
             if [[ ! -e $maybe_file ]]; then
@@ -417,14 +546,19 @@ declare-queue-throgh-mgmt() {
 
 run-plugins-for() {
     local node_name="${1:?}"; shift
+    remote-invoke $(host-part $node_name) run-plugins-for-local $node_name "$@"
+}
+
+run-plugins-for-local() {
+    local node_name="${1:?}"; shift
     local node_dir; node_dir="$(node-dir $node_name)"
 
     RABBITMQ_CONFIG_FILE="$node_dir/rabbitmq.config" \
-    RABBITMQ_NODENAME="$node_name@localhost" \
+    RABBITMQ_NODENAME="$node_name" \
     RABBITMQ_SCHEMA_DIR="$node_dir/schema" \
     RABBITMQ_PLUGINS_EXPAND_DIR="$node_dir/plugins" \
     RABBITMQ_ENABLED_PLUGINS_FILE="$node_dir/enabled_plugins" \
-    run-plugins -n $node_name@localhost "$@"
+    run-plugins -n $node_name "$@"
 }
 
 run-plugins() {
@@ -447,12 +581,155 @@ for-each-node() {
     done
 }
 
-choose-default-amqp-port() {
+prepare-remote() {
+    local host="${1:?}"
+
+    prepare-remote-test-framework $host
+    prepare-remote-rabbit-installation $host:/tmp
+    prepare-remote-ssl-certs $host:/tmp
+
+    echo "$host initialized"
+}
+
+prepare-docker-image() {
+    local target="$DESTRUCTIVE_ROOT/.docker-context"
+
+    mkdir -p $target/rabbit_destructive_tests/apps/sut/priv
+    rsync -az $DESTRUCTIVE_ROOT/apps/sut/priv/ $target/rabbit_destructive_tests/apps/sut/priv
+
+    prepare-remote-rabbit-installation $target
+    # prepare-remote-ssl-certs $target
+
+    cp $DESTRUCTIVE_ROOT/apps/sut/priv/docker/* $target
+
+    (cd $target && docker build -q -t rabbit_sut .)
+}
+
+prepare-remote-test-framework() {
+    local host="${1:?}"
+    rsync -az $DESTRUCTIVE_ROOT/ "$host":/tmp/rabbit_destructive_tests
+}
+
+prepare-remote-rabbit-installation() {
+    local target="${1:?}"
+    rsync -az $(dirname $(dirname $RABBITMQ_SERVER))/ $target/rabbit_under_test
+}
+
+prepare-remote-ssl-certs() {
+    local target="${1:?}"
+
+    ensure-ssl-certs
+    local ssl_dir; ssl_dir=$(ssl-dir)
+    rsync -az --delete $ssl_dir/ $target/$ssl_dir
+}
+
+ssl-dir() {
+    node-dir ssl-certificates
+}
+
+# Due to subshells we should also cache to disk
+declare -A memoize_cache
+memoize_cache=()
+memoize_cache_dir=$(mktemp --directory --suffix .destrucive-memoize.$$)
+
+memoized() {
+    local cache_key; cache_key=$(echo "$*" | sha256sum | awk '{print $1}')
+    if [[ ${memoize_cache[$cache_key]-NOT_MEMOIZED} == NOT_MEMOIZED ]]; then
+        # Store to file first, where it can be lifted from subshell later
+        if [[ ! -e $memoize_cache_dir/$cache_key ]]; then
+            "$@" > $memoize_cache_dir/$cache_key
+        fi
+        memoize_cache[$cache_key]=$(cat $memoize_cache_dir/$cache_key)
+    fi
+    printf '%s' "${memoize_cache[$cache_key]}"
+}
+
+ensure-docker-network() {
+    if ! docker network inspect rabbit-sut-net > /dev/null 2>&1 ; then
+	debug "Creating docker network $rabbit-sut-net"
+        docker network create rabbit-sut-net
+    fi
+}
+
+get-docker-container-status() {
+    local container_name="${1:?}"
+
+    set +e
+    local container_status
+    local rc
+    container_status=$(docker inspect --format '{{.State.Status}}' $container_name 2> /dev/null)
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+        echo "absent"
+        return 0
+    fi
+    echo $container_status
+}
+
+is-docker-container-running-from-image() {
+    local container_name="${1:?}"
+    local image="${2:?}"
+    if [[ $(get-docker-container-status $container_name) != "running" ]]; then
+	debug "Container $container_name is not running"
+        return 1
+    fi
+    local running_image
+    running_image=$(docker inspect --format '{{.Image}}' $container_name)
+    if [[ $running_image != $image ]]; then
+	debug "Container $container_name is not running image $image_id (=/= $image)"
+        return 1
+    fi
+    debug "Container $container_name is already running with image $image_id"
+    return 0
+}
+
+ensure-docker-sut-container() {
+    local container_name="${1:?}"
+    shift
+
+    ensure-docker-network
+    local image_id=$(memoized prepare-docker-image)
+
+    ensure-running-docker-container $container_name $image_id bash -c "while true ; do sleep 1000; done"
+}
+
+run-docker-container() {
+    local container_name="${1:?}"
+    local image_id="${2:?}"
+    shift 2
+    docker run --net rabbit-sut-net --name $container_name --hostname $container_name --detach $image_id "$@"
+}
+
+set-config-for() {
     local node_name="${1:?}"
-    local base_port; base_port=$(base-port-for $node_name)
-    if [[ $AMQP_SSL -gt 0 ]]; then
-        echo $(amqp-ssl-port $base_port)
-    else
-        echo $(amqp-port $base_port)
+    shift
+    remote-invoke $(host-part $node_name) local-set-config $node_name "$@"
+    remote-invoke $(host-part $node_name) local-update-config-file $node_name
+}
+
+ensure-docker-image() {
+    local image_name="${1:?}"
+    if [[ -z $(docker images -q $image_name) ]]; then
+	docker pull $image_name
+    fi
+    docker inspect --format '{{.Id}}' $image_name
+}
+
+ensure-running-docker-container() {
+    local container_name="${1:?}"
+    local image_id="${2:?}"
+    shift 2
+    if is-docker-container-running-from-image $container_name $image_id; then
+	return 0
+    fi
+    debug "Container $container_name is not properly running, refreshing"
+    docker rm -f $container_name > /dev/null 2>&1 || true
+    run-docker-container $container_name $image_id "$@" > /dev/null
+}
+
+debug() {
+    if [[ -n $DEBUG ]]; then
+	echo $DEBUG_PREFIX: "$@" 1>&2
     fi
 }

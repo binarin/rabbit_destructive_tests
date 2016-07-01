@@ -1,25 +1,46 @@
 #!/usr/bin/env bash
-set -eu
+set -eux
 set -o pipefail
+
+# apt-get install r-cran-plyr r-cran-getopt r-cran-proto r-cran-ggplot2
 
 ROOT=$(dirname $(readlink -f -- $0))
 
-BB_DIR=/home/binarin/mirantis-workspace/basho_bench
+RABBITMQ_SERVER=../rabbitmq-server/scripts/rabbitmq-server
+TARGET_QUEUE_PLACEMENTS=first_node,worst
+TARGET_MESSAGING_PATTERNS=one_shot_direct,explicit_reply_queue,direct_reply_to
+TARGET_HOST=localhost
+
+parse-option() {
+    case "$1" in
+        -r|--rabbitmq-server)
+            RABBITMQ_SERVER="$2"; return 2;;
+        -q|--queue-placement)
+            TARGET_QUEUE_PLACEMENTS="$2"; return 2;;
+        -m|--messaging-pattern)
+            TARGET_MESSAGING_PATTERNS="$2"; return 2;;
+        -t|--target-host)
+            TARGET_HOST="$2"; return 2;;
+        -c|--concurrency)
+            CONCURRENCY="$2"; return 2;;
+        *) return Internal error; exit 1;;
+    esac
+}
+
+TMP_OPTS=$(getopt -o q:m:r:t:c: --long queue-placement:messaging-pattern:rabbitmq-server:target-host:concurrency: -n perf_test -- "$@")
+
+. $ROOT/apps/sut/priv/parse-option-loop.sh
 . $ROOT/apps/sut/priv/functions.sh
 . $ROOT/apps/sut/priv/perf.sh
 
+BB_DIR=/home/binarin/mirantis-workspace/basho_bench
 HEADER_DUMPED=0
-
-
-# export PATH=/home/binarin/mirantis-workspace/otp/bin:$PATH
+SUT_NODES=(perf-test-1@$TARGET_HOST perf-test-2@$TARGET_HOST perf-test-3@$TARGET_HOST)
 
 setup-test-nodes() {
-    start-fresh-background-node ssl-1
-    start-fresh-background-node ssl-2
-    start-fresh-background-node ssl-3
-
-    wait-nodes ssl-1 ssl-2 ssl-3
-    join-nodes ssl-1 ssl-2 ssl-3
+    for-each-node "${SUT_NODES[*]}" start-fresh-background-node
+    wait-nodes "${SUT_NODES[@]}"
+    # join-nodes "${SUT_NODES[@]}"
 }
 
 run-benchmark() {
@@ -43,47 +64,33 @@ dump-summary-header() {
     fi
 }
 
-run-stages() {
-    local ITER_HEAD_ORIG="${ITER_HEAD:-}"
-    local ITER_VALUES_ORIG="${ITER_VALUES:-}"
-    if [[ $# -eq 0 ]]; then
-        return 0
-    fi
-    local this_stage="$1"; shift
-    case $this_stage in
-        iterate:*)
-            if [[ $this_stage =~ ^iterate:([A-Z0-9_]+)=(.+)$ ]]; then
-                local var_name="${BASH_REMATCH[1]}"
-                local values="${BASH_REMATCH[2]}"
-                local cur_value
-                while IFS=, read cur_value; do
-                    eval $var_name="$cur_value"
-                    echo "Setting $var_name to $cur_value"
-                    local ITER_HEAD="${ITER_HEAD_ORIG:-}${ITER_HEAD_ORIG:+\t}$var_name"
-                    local ITER_VALUES="${ITER_VALUES_ORIG:-}${ITER_VALUES_ORIG:+\t}$cur_value"
-                    run-stages "$@"
-                done < <(echo $values | sed -e 's/,/\n/g') # write it this way to prevent subshell
-            else
-                echo "Malformed iteration stage: $this_stage"
-            fi
-            ;;
-        *)
-            echo Running $this_stage
-            $this_stage
-            run-stages "$@"
-            ;;
-    esac
+partial-profiling() {
+    local beam
+    beam=$(find $(pwd) -name eep.beam | head -n1)
+    local base
+    base=${beam%.beam}
+    local profile_log
+    profile_log="$QUEUE_PLACEMENT-$MESSAGING_PATTERN.prof.log"
+    run-ctl-for "${SUT_NODES[1]}" eval "code:load_abs(\"$base\")."
+    (
+        sleep 10
+        echo "Taking profile sample!"
+        run-ctl-for "${SUT_NODES[1]}" eval "eep:start_file_tracing(\"file_name\"), timer:sleep(10000), eep:stop_tracing()."
+        echo "Profile sample taken to $profile_log"
+    ) &
 }
 
 stages=(
     make
     setup-test-nodes
-    iterate:QUEUE_PLACEMENT=first_node,worst
-    iterate:MESSAGING_PATTERN=explicit_reply_queue,direct_reply_to
+    iterate:QUEUE_PLACEMENT=$TARGET_QUEUE_PLACEMENTS
+    iterate:MESSAGING_PATTERN=$TARGET_MESSAGING_PATTERNS
     dump-summary-header
     generate-bb-config
     set-benchmark-outputs
+    partial-profiling
+    run-benchmark
+    run-benchmark
     run-benchmark
 )
-
 run-stages "${stages[@]}"
