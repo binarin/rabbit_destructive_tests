@@ -768,5 +768,14 @@ node-iptables-ensure-empty-chain() {
 
 iptables-ensure-empty-chain-local() {
     debug "Ensuring empty iptables chain $1"
-    (iptables -N "$@" || iptables -F "$@")
+    (iptables -N "$@" || iptables -F "$@") > /dev/null 2>&1
+}
+
+node-docker-container-ip() {
+    local node="${1:?}"
+    if [[ $(get-docker-container-status $(host-part $node)) != "running" ]]; then
+        echo "Can't get ip of not running $node"
+        return 1
+    fi
+    docker inspect --format '{{(index .NetworkSettings.Networks "rabbit-sut-net").IPAddress}}' $(host-part $node)
 }

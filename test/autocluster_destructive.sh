@@ -355,6 +355,12 @@ run-unjoined-partitions-test() {
     wait-for-settle-down
 }
 
+remove-wall() {
+    local comment=destructive_partition_a32cdcd99559185800e68e2e00f6f1d4
+    local nodes="$@"
+    for-each-node "$nodes" node-iptables-flush-comment $comment
+}
+
 wall-off-nodes() {
     local comment=destructive_partition_a32cdcd99559185800e68e2e00f6f1d4
     local nodes="$@"
@@ -366,20 +372,20 @@ wall-off-nodes() {
         node-iptables-flush-comment $node $comment
         node-iptables-ensure-empty-chain $node destructive_partition_input
         node-iptables-ensure-empty-chain $node destructive_partition_output
-        node-iptables-c $node $comment -I INPUT -p tcp '!' -i lo -j destructive_partition_input
-        node-iptables-c $node $comment -I OUTPUT -p tcp '!' -o lo -j destructive_partition_input
 
-        for target in "$nodes"; do
+        for target in $nodes; do
             target_ip=$(node-docker-container-ip $target)
             node_ip=$(node-docker-container-ip $node)
-            docker exec $(host-part $node) iptables -A destructive_partition_input -p tcp -s $target_ip -j ACCEPT
-            docker exec $(host-part $node) iptables -A destructive_partition_output -p tcp -d $target_ip -j ACCEPT
+            node-iptables-c $node $comment -A destructive_partition_input -p tcp -s $target_ip -j ACCEPT
+            node-iptables-c $node $comment -A  destructive_partition_output -p tcp -d $target_ip -j ACCEPT
         done
 
-        node-iptables -A destructive_partition_output -j DROP
-        node-iptables -A destructive_partition_input -j DROP
-    done
+        node-iptables-c $node $comment -I INPUT -p tcp '!' -i lo -j destructive_partition_input
+        node-iptables $node -A destructive_partition_input -j DROP
 
+        node-iptables-c $node $comment -I OUTPUT -p tcp '!' -o lo -j destructive_partition_output
+        node-iptables $node -A destructive_partition_output -j DROP
+    done
 }
 
 case "$1" in
