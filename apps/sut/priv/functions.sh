@@ -5,6 +5,7 @@
 : ${RABBITMQ_PLUGINS_DIR:=$(readlink -f $(dirname $RABBITMQ_SERVER)/../plugins)}
 : ${ERLANG_SSL:=0}
 : ${AMQP_SSL:=0}
+: ${DOCKER_OPTS:=--privileged}
 
 : ${INVOKE_REMOTE_HOST:=}
 
@@ -698,7 +699,7 @@ run-docker-container() {
     local container_name="${1:?}"
     local image_id="${2:?}"
     shift 2
-    docker run --net rabbit-sut-net --name $container_name --hostname $container_name --detach $image_id "$@"
+    docker run $DOCKER_OPTS --net rabbit-sut-net --name $container_name --hostname $container_name --detach $image_id "$@"
 }
 
 set-config-for() {
@@ -732,4 +733,40 @@ debug() {
     if [[ -n $DEBUG ]]; then
 	echo $DEBUG_PREFIX: "$@" 1>&2
     fi
+}
+
+node-iptables() {
+    local node="${1:?}"; shift
+    local host; host=$(host-part $node)
+    remote-invoke $host iptables "$@"
+}
+
+node-iptables-c() {
+    local node="${1:?}"
+    local comment="${2:?}"
+    shift 2
+    node-iptables $node "$@" -m comment --comment "$comment"
+}
+
+node-iptables-flush-comment() {
+    local node="${1:?}"
+    local comment="${2:?}"
+    remote-invoke $(host-part $node) iptables-flush-comment-local "$comment"
+}
+
+iptables-flush-comment-local() {
+    local comment="${1:?}"
+    debug "Flushing iptables rules with comment '$comment'"
+    iptables-save | grep -v "$comment" | iptables-restore
+}
+
+node-iptables-ensure-empty-chain() {
+    local node="${1:?}"
+    shift
+    remote-invoke $(host-part $node) iptables-ensure-empty-chain-local "$@"
+}
+
+iptables-ensure-empty-chain-local() {
+    debug "Ensuring empty iptables chain $1"
+    (iptables -N "$@" || iptables -F "$@")
 }

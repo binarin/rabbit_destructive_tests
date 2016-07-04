@@ -314,14 +314,82 @@ inject-autocluster-into-rabbit() {
     cp $AUTOCLUSTER_DIR/plugins/autocluster*.ez $AUTOCLUSTER_DIR/plugins/rabbitmq_aws*.ez $RABBIT_DIR/plugins
 }
 
+setup() {
+    checkout-and-build-autocluster
+    checkout-and-build-rabbit
+    inject-autocluster-into-rabbit
+    remove-old-docker-containers
+    ensure-etcd-container
+}
+
+run-unjoined-partitions-test() {
+    # subset of SUT_NODES
+    local my_nodes="rabbit@docker-autocluster-1 rabbit@docker-autocluster-2 rabbit@docker-autocluster-3"
+
+    # we need iptables inside docker
+    local DOCKER_OPTS=--privileged
+
+    # form a 3-node cluster
+    for-each-node "$my_nodes" ro-start-new
+    wait-for-settle-down
+    for-each-node "$my_nodes" set-node-status disconnected
+
+    # allow TCP communication only within this 3-node cluster
+    wall-off-nodes $my_nodes
+
+    # wait for etcd TTL
+    sleep 60
+
+    # start second 3-node cluster
+    local other_nodes="rabbit@docker-autocluster-4 rabbit@docker-autocluster-5 rabbit@docker-autocluster-6"
+    for-each-node "$other_nodes" ro-start-new
+
+    # do cluster integrity check, but only on the new set of nodes
+    wait-for-settle-down
+
+    # reconnect first set of nodes with the rest of the world
+    for-each-node "$my_nodes" remove-wall
+    for-each-node "$my_nodes" set-node-status running
+
+    # and in the end we should have 6-node healthy cluster
+    wait-for-settle-down
+}
+
+wall-off-nodes() {
+    local comment=destructive_partition_a32cdcd99559185800e68e2e00f6f1d4
+    local nodes="$@"
+    local target_ip
+    local node_ip
+    local target
+    local node
+    for node in $nodes; do
+        node-iptables-flush-comment $node $comment
+        node-iptables-ensure-empty-chain $node destructive_partition_input
+        node-iptables-ensure-empty-chain $node destructive_partition_output
+        node-iptables-c $node $comment -I INPUT -p tcp '!' -i lo -j destructive_partition_input
+        node-iptables-c $node $comment -I OUTPUT -p tcp '!' -o lo -j destructive_partition_input
+
+        for target in "$nodes"; do
+            target_ip=$(node-docker-container-ip $target)
+            node_ip=$(node-docker-container-ip $node)
+            docker exec $(host-part $node) iptables -A destructive_partition_input -p tcp -s $target_ip -j ACCEPT
+            docker exec $(host-part $node) iptables -A destructive_partition_output -p tcp -d $target_ip -j ACCEPT
+        done
+
+        node-iptables -A destructive_partition_output -j DROP
+        node-iptables -A destructive_partition_input -j DROP
+    done
+
+}
+
 case "$1" in
     test)
-        checkout-and-build-autocluster
-        checkout-and-build-rabbit
-        inject-autocluster-into-rabbit
-        remove-old-docker-containers
-        ensure-etcd-container
+        setup
         run-destructive-test
+        ;;
+    unjoined-partitions)
+        setup
+        run-unjoined-partitions-test
         ;;
     *)
         "$@"

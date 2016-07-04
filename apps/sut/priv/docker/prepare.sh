@@ -1,4 +1,5 @@
 #!/bin/sh
+set -eu
 
 cat <<EOF > /etc/apt/sources.list
 deb http://httpredir.debian.org/debian jessie main contrib non-free
@@ -10,4 +11,4 @@ EOF
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get -y build-dep rabbitmq-server
-apt-get -y install socat less dnsutils bind9utils
+apt-get -y install socat less dnsutils bind9utils iptables
